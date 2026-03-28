@@ -1,0 +1,56 @@
+[-] Reset error: attempt to write a readonly database
+
+--- Submitting New Tickets ---
+[-] Insertion error: attempt to write a readonly database
+[-] Insertion error: attempt to write a readonly database
+[-] Insertion error: attempt to write a readonly database
+[-] Insertion error: attempt to write a readonly database
+
+--- Testing State Machine ---
+[-] Error: Ticket ID None not found.
+[-] Error: Ticket ID None not found.
+[-] Error: Ticket ID None not found.
+[-] Error: Ticket ID 999 not found.
+
+--- Testing Delete (D in CRUD) ---
+[-] Error: Ticket ID None not found.
+
+--- Tickets | Status: All | Priority: All ---
+   ID:1 | System Outage        | IT Support   | Critical | In Progress  | Updated: 2026-03-28 15:53:37
+   ID:2 | Duplicate Charge     | Billing      | Medium   | Resolved     | Updated: 2026-03-28 15:53:37
+   ID:3 | Sick Leave           | HR           | Medium   | Open         | Updated: 2026-03-28 15:53:37
+
+--- Tickets | Status: Open | Priority: All ---
+   ID:3 | Sick Leave           | HR           | Medium   | Open         | Updated: 2026-03-28 15:53:37
+
+--- Tickets | Status: All | Priority: Critical ---
+   ID:1 | System Outage        | IT Support   | Critical | In Progress  | Updated: 2026-03-28 15:53:37
+
+--- Search: 'password' ---
+   No matching tickets found.
+
+--- Audit Trail Verification ---
+
+--- Audit Trail: Ticket None ---
+   No transitions recorded for this ticket.
+
+--- Audit Trail: Ticket None ---
+   No transitions recorded for this ticket.
+
+========== OPERATIONAL REPORTS ==========
+
+1. Workload by Department (LEFT JOIN):
+   Billing        : 1 ticket(s)
+   HR             : 1 ticket(s)
+   IT Support     : 1 ticket(s)
+   General        : 0 ticket(s)
+
+2. Ticket Count by Priority (GROUP BY):
+   Medium         : 2 ticket(s)
+   Critical       : 1 ticket(s)
+
+3. Open Tickets per Department (filter in ON clause):
+   HR             : 1 open
+   Billing        : 0 open
+   General        : 0 open
+   IT Support     : 0 open
