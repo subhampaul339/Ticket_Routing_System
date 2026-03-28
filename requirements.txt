@@ -1,0 +1,7 @@
+# No third-party dependencies required.
+# Uses Python standard library only.
+#
+# sqlite3  — built-in database engine
+# typing   — built-in type hint support
+#
+# Compatible with Python 3.7+
