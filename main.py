@@ -1,4 +1,326 @@
-#!/usr/bin/env python
+import sqlite3
+from typing import Tuple, Optional, Dict, List
+
+# Department constants
+DEPT_IT = "IT Support"
+DEPT_BILLING = "Billing"
+DEPT_HR = "HR"
+DEPT_GENERAL = "General"
+
+# State machine — module level, created once
+VALID_TRANSITIONS: Dict[str, List[str]] = {
+    'Open':        ['In Progress', 'Resolved'],
+    'In Progress': ['Resolved'],
+    'Resolved':    []
+}
+
+DB_NAME = 'smart_helpdesk.db'
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute('PRAGMA foreign_keys = ON;')
+    return conn
+
+
+def initialize_database(conn: sqlite3.Connection) -> None:
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS departments (
+                dept_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                dept_name TEXT UNIQUE NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tickets (
+                ticket_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT    NOT NULL,
+                description TEXT    NOT NULL,
+                category    TEXT    NOT NULL,
+                priority    TEXT    NOT NULL,
+                status      TEXT    NOT NULL DEFAULT 'Open',
+                dept_id     INTEGER NOT NULL,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (dept_id) REFERENCES departments(dept_id)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_logs (
+                log_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id  INTEGER NOT NULL,
+                old_status TEXT    NOT NULL,
+                new_status TEXT    NOT NULL,
+                changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id)
+            )
+        """)
+        c.execute('CREATE INDEX IF NOT EXISTS idx_tickets_status   ON tickets(status)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_tickets_priority ON tickets(priority)')
+        c.executemany(
+            'INSERT OR IGNORE INTO departments (dept_name) VALUES (?)',
+            [(DEPT_IT,), (DEPT_BILLING,), (DEPT_HR,), (DEPT_GENERAL,)]
+        )
+        conn.commit()
+        print("[*] Database ready.")
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[-] Setup error: {e}")
+
+
+def analyze_ticket(text: str) -> Tuple[str, str, str]:
+    t = text.lower()
+
+    if any(w in t for w in ['server', 'network', 'login', 'password', 'system']):
+        category, dept = "Technical", DEPT_IT
+    elif any(w in t for w in ['invoice', 'charge', 'payment', 'refund']):
+        category, dept = "Billing", DEPT_BILLING
+    elif any(w in t for w in ['leave', 'payroll', 'manager', 'policy']):
+        category, dept = "HR", DEPT_HR
+    else:
+        category, dept = "General Inquiry", DEPT_GENERAL
+
+    if any(w in t for w in ['urgent', 'crash', 'down', 'immediately', 'critical']):
+        priority = "Critical"
+    elif any(w in t for w in ['error', 'issue', 'unable', 'fail', 'blocked']):
+        priority = "High"
+    elif any(w in t for w in ['request', 'need', 'clarify']):
+        priority = "Medium"
+    else:
+        priority = "Low"
+
+    return category, priority, dept
+
+
+def get_department_id(conn: sqlite3.Connection, dept_name: str) -> int:
+    c = conn.cursor()
+    c.execute('SELECT dept_id FROM departments WHERE dept_name = ?', (dept_name,))
+    row = c.fetchone()
+    if row:
+        return row[0]
+    c.execute('SELECT dept_id FROM departments WHERE dept_name = ?', (DEPT_GENERAL,))
+    fallback = c.fetchone()
+    if not fallback:
+        raise ValueError(f"FATAL: '{DEPT_GENERAL}' department missing.")
+    return fallback[0]
+
+
+def submit_ticket(conn: sqlite3.Connection, title: str, description: str) -> Optional[int]:
+    title = title.strip()
+    description = description.strip()
+    if not title or not description:
+        print("[-] Title and description cannot be empty.")
+        return None
+
+    category, priority, dept_name = analyze_ticket(title + " " + description)
+    dept_id = get_department_id(conn, dept_name)
+
+    try:
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO tickets (title, description, category, priority, dept_id) VALUES (?, ?, ?, ?, ?)',
+            (title, description, category, priority, dept_id)
+        )
+        conn.commit()
+        ticket_id = c.lastrowid
+        print(f"[+] Ticket {ticket_id} created: '{title}' → {dept_name} [{priority}]")
+        return ticket_id
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[-] Insert error: {e}")
+        return None
+
+
+def update_ticket_status(conn: sqlite3.Connection, ticket_id: int, new_status: str) -> None:
+    try:
+        c = conn.cursor()
+        c.execute('SELECT status FROM tickets WHERE ticket_id = ?', (ticket_id,))
+        row = c.fetchone()
+        if not row:
+            print(f"[-] Ticket {ticket_id} not found.")
+            return
+
+        current = row[0]
+        if new_status not in VALID_TRANSITIONS.get(current, []):
+            print(f"[-] Invalid transition: {current} → {new_status}")
+            return
+
+        c.execute(
+            'UPDATE tickets SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE ticket_id = ?',
+            (new_status, ticket_id)
+        )
+        c.execute(
+            'INSERT INTO ticket_logs (ticket_id, old_status, new_status) VALUES (?, ?, ?)',
+            (ticket_id, current, new_status)
+        )
+        conn.commit()
+        print(f"[*] Ticket {ticket_id}: {current} → {new_status}")
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[-] Update error: {e}")
+
+
+def delete_ticket(conn: sqlite3.Connection, ticket_id: int) -> None:
+    try:
+        c = conn.cursor()
+        c.execute('SELECT ticket_id FROM tickets WHERE ticket_id = ?', (ticket_id,))
+        if not c.fetchone():
+            print(f"[-] Ticket {ticket_id} not found.")
+            return
+        c.execute('DELETE FROM tickets WHERE ticket_id = ?', (ticket_id,))
+        conn.commit()
+        print(f"[!] Ticket {ticket_id} deleted.")
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[-] Delete error: {e}")
+
+
+def reset_tickets(conn: sqlite3.Connection) -> None:
+    try:
+        c = conn.cursor()
+        c.execute('DELETE FROM ticket_logs')
+        c.execute('DELETE FROM tickets')
+        c.execute("DELETE FROM sqlite_sequence WHERE name='ticket_logs'")
+        c.execute("DELETE FROM sqlite_sequence WHERE name='tickets'")
+        conn.commit()
+        print("[!] All tickets cleared.")
+    except sqlite3.Error as e:
+        conn.rollback()
+        print(f"[-] Reset error: {e}")
+
+
+def filter_tickets(conn: sqlite3.Connection, status: str = None, priority: str = None) -> None:
+    query = """
+        SELECT t.ticket_id, t.title, t.status, t.priority, d.dept_name, t.updated_at
+        FROM tickets t
+        JOIN departments d ON t.dept_id = d.dept_id
+        WHERE 1=1
+    """
+    params = []
+    if status:
+        query += ' AND t.status = ?'
+        params.append(status)
+    if priority:
+        query += ' AND t.priority = ?'
+        params.append(priority)
+
+    c = conn.cursor()
+    c.execute(query, tuple(params))
+    rows = c.fetchall()
+    print(f"\n--- Tickets | Status: {status or 'All'} | Priority: {priority or 'All'} ---")
+    if not rows:
+        print("   No tickets found.")
+        return
+    for r in rows:
+        print(f"   ID:{r[0]} | {r[1]:<20} | {r[4]:<12} | {r[3]:<8} | {r[2]:<12} | {r[5]}")
+
+
+def search_tickets(conn: sqlite3.Connection, keyword: str) -> None:
+    term = f"%{keyword}%"
+    c = conn.cursor()
+    c.execute("""
+        SELECT t.ticket_id, t.title, t.status, d.dept_name
+        FROM tickets t
+        JOIN departments d ON t.dept_id = d.dept_id
+        WHERE t.title LIKE ? OR t.description LIKE ?
+    """, (term, term))
+    rows = c.fetchall()
+    print(f"\n--- Search: '{keyword}' ---")
+    if not rows:
+        print("   No results.")
+        return
+    for r in rows:
+        print(f"   ID:{r[0]} | {r[1]:<20} | {r[3]:<12} | {r[2]}")
+
+
+def get_audit_trail(conn: sqlite3.Connection, ticket_id: int) -> None:
+    c = conn.cursor()
+    c.execute("""
+        SELECT l.log_id, t.title, l.old_status, l.new_status, l.changed_at
+        FROM ticket_logs l
+        JOIN tickets t ON l.ticket_id = t.ticket_id
+        WHERE l.ticket_id = ?
+        ORDER BY l.changed_at ASC
+    """, (ticket_id,))
+    rows = c.fetchall()
+    print(f"\n--- Audit Trail: Ticket {ticket_id} ---")
+    if not rows:
+        print("   No transitions recorded.")
+        return
+    for r in rows:
+        print(f"   [Log {r[0]}] '{r[1]}': {r[2]} → {r[3]}  ({r[4]})")
+
+
+def generate_reports(conn: sqlite3.Connection) -> None:
+    c = conn.cursor()
+    print("\n========== REPORTS ==========")
+
+    print("\n1. Workload by Department:")
+    c.execute("""
+        SELECT d.dept_name, COUNT(t.ticket_id) AS total
+        FROM departments d
+        LEFT JOIN tickets t ON d.dept_id = t.dept_id
+        GROUP BY d.dept_name ORDER BY total DESC
+    """)
+    for r in c.fetchall():
+        print(f"   {r[0]:<15}: {r[1]} ticket(s)")
+
+    print("\n2. Tickets by Priority:")
+    c.execute("""
+        SELECT priority, COUNT(*) AS count
+        FROM tickets GROUP BY priority ORDER BY count DESC
+    """)
+    rows = c.fetchall()
+    if not rows:
+        print("   No tickets.")
+    for r in rows:
+        print(f"   {r[0]:<15}: {r[1]} ticket(s)")
+
+    print("\n3. Open Tickets per Department:")
+    c.execute("""
+        SELECT d.dept_name, COUNT(t.ticket_id) AS open_count
+        FROM departments d
+        LEFT JOIN tickets t ON d.dept_id = t.dept_id AND t.status = 'Open'
+        GROUP BY d.dept_name ORDER BY open_count DESC
+    """)
+    for r in c.fetchall():
+        print(f"   {r[0]:<15}: {r[1]} open")
+
+
+if __name__ == "__main__":
+    db = get_connection()
+    initialize_database(db)
+
+    reset_tickets(db)
+
+    print("\n--- Submitting Tickets ---")
+    id1 = submit_ticket(db, "System Outage",    "Production server is down. Users cannot login. Urgent crash.")
+    id2 = submit_ticket(db, "Duplicate Charge", "Need refund for duplicate charge on my invoice.")
+    id3 = submit_ticket(db, "Sick Leave",       "I need sick leave policy clarification request.")
+    id4 = submit_ticket(db, "Password Reset",   "Forgot system password, unable to access the portal.")
+
+    print("\n--- State Machine Tests ---")
+    update_ticket_status(db, id1, 'In Progress')
+    update_ticket_status(db, id2, 'Resolved')
+    update_ticket_status(db, id2, 'In Progress')
+    update_ticket_status(db, 999, 'Resolved')
+
+    print("\n--- Delete Test ---")
+    delete_ticket(db, id4)
+
+    filter_tickets(db)
+    filter_tickets(db, status="Open")
+    filter_tickets(db, priority="Critical")
+    search_tickets(db, "password")
+
+    print("\n--- Audit Trail ---")
+    get_audit_trail(db, id1)
+    get_audit_trail(db, id2)
+
+    generate_reports(db)
+    db.close()
+    print("\n[*] Connection closed.")#!/usr/bin/env python
 # coding: utf-8
 
 # In[1]:
